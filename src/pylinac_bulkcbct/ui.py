@@ -110,8 +110,10 @@ def create_app() -> Flask:
             input[type=text], textarea, select { width: 100%; padding: 0.6rem 0.8rem; border-radius: 8px; border: 1px solid #ccd6eb; font-size: 1rem; }
             input[type=text]:focus, textarea:focus, select:focus { outline: 2px solid #1f4b99; }
             .checkbox { display: flex; align-items: center; gap: 0.5rem; }
-            .actions { display: flex; gap: 0.75rem; align-items: center; }
+            .actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
             button { background: #1f4b99; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 999px; font-size: 1rem; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
+            button.secondary { background: #4b5563; }
+            button.secondary:hover { background: #374151; }
             button:hover { background: #163a76; }
             .message { padding: 0.75rem 1rem; border-radius: 8px; }
             .message.error { background: #fce8e6; color: #6b1a12; border: 1px solid #f7b5ae; }
@@ -164,7 +166,8 @@ def create_app() -> Flask:
                     <label for="follow_symlinks">Follow symlinks during the scan</label>
                 </div>
                 <div class="actions">
-                    <button type="submit">Pull CBCTs</button>
+                    <button type="submit" name="action" value="inventory">Pull CBCTs</button>
+                    <button type="submit" name="action" value="analyze" class="secondary">Run Catphan Analysis</button>
                 </div>
             </form>
 
@@ -276,16 +279,19 @@ def create_app() -> Flask:
         inventory_dict: dict | None = None
         inventory_json: str | None = None
         analysis = None
+        action = "inventory"
 
         if request.method == "POST":
             state.root = request.form.get("root", "").strip()
             state.extensions = request.form.get("extensions", state.extensions)
             state.follow_symlinks = request.form.get("follow_symlinks") == "on"
             state.phantom = request.form.get("phantom", state.phantom)
+            action = request.form.get("action", "inventory")
 
             if not state.root:
                 flash("Please provide a root directory to scan.", "error")
             else:
+                inventory = None
                 try:
                     inventory = _build_inventory_from_form(state)
                 except FileNotFoundError:
@@ -302,17 +308,21 @@ def create_app() -> Flask:
                         "success",
                     )
 
-                    try:
-                        analysis = run_catphan_analysis(inventory, state.phantom)
-                    except CatphanAnalysisError as exc:
-                        flash(str(exc), "error")
-                    except Exception as exc:  # pragma: no cover - defensive
-                        flash(f"Failed to run Pylinac analysis: {exc}", "error")
-                    else:
-                        flash(
-                            "Pylinac Catphan analysis completed. Review the results below.",
-                            "success",
-                        )
+                    if action == "analyze":
+                        if not inventory.studies:
+                            flash("No studies were discovered to analyze.", "error")
+                        else:
+                            try:
+                                analysis = run_catphan_analysis(inventory, state.phantom)
+                            except CatphanAnalysisError as exc:
+                                flash(str(exc), "error")
+                            except Exception as exc:  # pragma: no cover - defensive
+                                flash(f"Failed to run Pylinac analysis: {exc}", "error")
+                            else:
+                                flash(
+                                    "Pylinac Catphan analysis completed. Review the results below.",
+                                    "success",
+                                )
 
         return render_template_string(
             template,

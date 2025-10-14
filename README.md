@@ -45,7 +45,7 @@ python -m pylinac_bulkcbct.ui
 pylinac-bulkcbct-ui
 ```
 
-Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. Pick the Catphan phantom model you plan to analyse against, adjust the image extensions if needed, and run the scan. The page displays summary metadata, a table of the detected studies, and automatically runs the selected Pylinac Catphan analysis to surface successes, failures, and text summaries for each dataset.
+Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. Pick the Catphan phantom model you plan to analyse against, adjust the image extensions if needed, and click **Pull CBCTs** to review the discovered studies. Once you are happy with the list, press **Run Catphan Analysis** to execute the selected Pylinac analysis. The page displays summary metadata for the scan, a table of detected studies, and per-study Catphan analysis outcomes when requested.
 
 ## Development
 

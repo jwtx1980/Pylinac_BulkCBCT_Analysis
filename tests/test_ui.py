@@ -25,6 +25,7 @@ def test_index_page_loads(client):
     assert b"CBCT Inventory Scanner" in response.data
     assert b"Catphan 503" in response.data
     assert b"Pull CBCTs" in response.data
+    assert b"Run Catphan Analysis" in response.data
 
 
 def test_invalid_root_shows_error(client):
@@ -34,6 +35,7 @@ def test_invalid_root_shows_error(client):
             "root": "/path/does/not/exist",
             "extensions": ".dcm",
             "phantom": "CatPhan503",
+            "action": "inventory",
         },
         follow_redirects=True,
     )
@@ -41,7 +43,35 @@ def test_invalid_root_shows_error(client):
     assert b"does not exist" in response.data
 
 
-def test_successful_scan_renders_results(tmp_path: Path, client, monkeypatch):
+def test_successful_scan_without_analysis(tmp_path: Path, client, monkeypatch):
+    study = tmp_path / "study1"
+    study.mkdir()
+    (study / "image1.dcm").write_bytes(b"data")
+    (study / "image2.dcm").write_bytes(b"data")
+
+    def fail_if_called(*args, **kwargs):  # pragma: no cover - defensive helper
+        raise AssertionError("Analysis should not run during inventory-only scans")
+
+    monkeypatch.setattr("pylinac_bulkcbct.ui.run_catphan_analysis", fail_if_called)
+
+    response = client.post(
+        "/",
+        data={
+            "root": str(tmp_path),
+            "extensions": ".dcm",
+            "phantom": "CatPhan503",
+            "action": "inventory",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Scan completed successfully" in response.data
+    assert b"study1" in response.data
+    assert b"Pylinac analysis" not in response.data
+
+
+def test_analysis_runs_when_requested(tmp_path: Path, client, monkeypatch):
     study = tmp_path / "study1"
     study.mkdir()
     (study / "image1.dcm").write_bytes(b"data")
@@ -81,13 +111,17 @@ def test_successful_scan_renders_results(tmp_path: Path, client, monkeypatch):
 
     response = client.post(
         "/",
-        data={"root": str(tmp_path), "extensions": ".dcm", "phantom": "CatPhan503"},
+        data={
+            "root": str(tmp_path),
+            "extensions": ".dcm",
+            "phantom": "CatPhan503",
+            "action": "analyze",
+        },
         follow_redirects=True,
     )
 
     assert response.status_code == 200
     assert b"Scan completed successfully" in response.data
-    assert b"study1" in response.data
     assert b"Pylinac analysis" in response.data
     assert b"status-pill success" in response.data
 
@@ -104,7 +138,12 @@ def test_analysis_error_is_reported(tmp_path: Path, client, monkeypatch):
 
     response = client.post(
         "/",
-        data={"root": str(tmp_path), "extensions": ".dcm", "phantom": "CatPhan503"},
+        data={
+            "root": str(tmp_path),
+            "extensions": ".dcm",
+            "phantom": "CatPhan503",
+            "action": "analyze",
+        },
         follow_redirects=True,
     )
 

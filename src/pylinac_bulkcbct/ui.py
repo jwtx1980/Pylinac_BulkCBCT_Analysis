@@ -5,9 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from flask import Flask, Response, flash, redirect, render_template_string, request, url_for
+from flask import Flask, flash, render_template_string, request
 
 try:  # pragma: no cover - exercised when running as script
+    from .analysis import (
+        CatphanAnalysisError,
+        run_catphan_analysis,
+    )
     from .inventory import DEFAULT_EXTENSIONS, StudyInventory, build_inventory
 except ImportError:  # pragma: no cover - fallback for direct execution
     import sys
@@ -17,6 +21,10 @@ except ImportError:  # pragma: no cover - fallback for direct execution
         DEFAULT_EXTENSIONS,
         StudyInventory,
         build_inventory,
+    )
+    from pylinac_bulkcbct.analysis import (  # type: ignore[import-not-found]
+        CatphanAnalysisError,
+        run_catphan_analysis,
     )
 
 
@@ -84,7 +92,6 @@ def _parse_extensions(raw: str) -> Sequence[str]:
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = "pylinac-bulkcbct-ui"
-    app.config.setdefault("LAST_INVENTORY_JSON", None)
 
     template = """
     <!doctype html>
@@ -104,8 +111,8 @@ def create_app() -> Flask:
             input[type=text]:focus, textarea:focus, select:focus { outline: 2px solid #1f4b99; }
             .checkbox { display: flex; align-items: center; gap: 0.5rem; }
             .actions { display: flex; gap: 0.75rem; align-items: center; }
-            button, .button-link { background: #1f4b99; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 999px; font-size: 1rem; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
-            button:hover, .button-link:hover { background: #163a76; }
+            button { background: #1f4b99; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 999px; font-size: 1rem; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
+            button:hover { background: #163a76; }
             .message { padding: 0.75rem 1rem; border-radius: 8px; }
             .message.error { background: #fce8e6; color: #6b1a12; border: 1px solid #f7b5ae; }
             .message.success { background: #e6f4ea; color: #0b5f1a; border: 1px solid #a1d6a3; }
@@ -115,6 +122,10 @@ def create_app() -> Flask:
             tbody tr:hover { background: #f9fbff; }
             .inventory-meta { margin-top: 2rem; display: grid; gap: 0.5rem; }
             pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+            .status-pill { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.75rem; border-radius: 999px; font-weight: 600; }
+            .status-pill.success { background: #e6f4ea; color: #0b5f1a; }
+            .status-pill.failure { background: #fce8e6; color: #6b1a12; }
+            details.analysis-details { margin-top: 1rem; }
         </style>
     </head>
     <body>
@@ -153,10 +164,7 @@ def create_app() -> Flask:
                     <label for="follow_symlinks">Follow symlinks during the scan</label>
                 </div>
                 <div class="actions">
-                    <button type="submit">Run inventory</button>
-                    {% if inventory %}
-                        <a href="{{ url_for('download_json') }}" class="button-link" download>Download JSON</a>
-                    {% endif %}
+                    <button type="submit">Pull CBCTs</button>
                 </div>
             </form>
 
@@ -194,6 +202,57 @@ def create_app() -> Flask:
                     <pre>{{ inventory_json }}</pre>
                 </details>
             {% endif %}
+
+            {% if analysis %}
+                <section class="inventory-meta">
+                    <h2>Pylinac analysis</h2>
+                    <p><strong>Catphan phantom:</strong> {{ analysis.phantom }}</p>
+                    <p><strong>Completed:</strong> {{ analysis.generated_at }}</p>
+                    <p><strong>Successes:</strong> {{ analysis.success_count }} &nbsp; <strong>Failures:</strong> {{ analysis.failure_count }}</p>
+                </section>
+                {% if analysis.results %}
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Study</th>
+                                <th>Status</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for result in analysis.results %}
+                                <tr>
+                                    <td><code>{{ result.study.relative_path }}</code></td>
+                                    <td>
+                                        {% if result.success %}
+                                            <span class="status-pill success">Success</span>
+                                        {% else %}
+                                            <span class="status-pill failure">Failed</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if result.success and result.summary %}
+                                            <details class="analysis-details">
+                                                <summary>View summary</summary>
+                                                <pre>{{ result.summary }}</pre>
+                                            </details>
+                                        {% elif result.error %}
+                                            <details class="analysis-details">
+                                                <summary>Error details</summary>
+                                                <pre>{{ result.error }}</pre>
+                                            </details>
+                                        {% else %}
+                                            <em>No details returned.</em>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>No studies were available for analysis.</p>
+                {% endif %}
+            {% endif %}
         </main>
     </body>
     </html>
@@ -216,6 +275,7 @@ def create_app() -> Flask:
         state = FormState()
         inventory_dict: dict | None = None
         inventory_json: str | None = None
+        analysis = None
 
         if request.method == "POST":
             state.root = request.form.get("root", "").strip()
@@ -237,30 +297,30 @@ def create_app() -> Flask:
                 else:
                     inventory_dict = inventory.to_dict()
                     inventory_json = inventory.to_json()
-                    app.config["LAST_INVENTORY_JSON"] = inventory_json
                     flash(
                         f"Scan completed successfully with {inventory_dict['study_count']} studies.",
                         "success",
                     )
+
+                    try:
+                        analysis = run_catphan_analysis(inventory, state.phantom)
+                    except CatphanAnalysisError as exc:
+                        flash(str(exc), "error")
+                    except Exception as exc:  # pragma: no cover - defensive
+                        flash(f"Failed to run Pylinac analysis: {exc}", "error")
+                    else:
+                        flash(
+                            "Pylinac Catphan analysis completed. Review the results below.",
+                            "success",
+                        )
 
         return render_template_string(
             template,
             state=state,
             inventory=inventory_dict,
             inventory_json=inventory_json,
+            analysis=analysis,
             phantom_options=CATPHAN_MODELS,
-        )
-
-    @app.route("/download.json")
-    def download_json() -> Response:
-        inventory_json = app.config.get("LAST_INVENTORY_JSON")
-        if inventory_json is None:
-            flash("Run a scan before downloading the JSON output.", "error")
-            return redirect(url_for("index"))
-        return Response(
-            inventory_json,
-            mimetype="application/json",
-            headers={"Content-Disposition": "attachment; filename=inventory.json"},
         )
 
     return app

@@ -9,7 +9,7 @@ Task 1 focuses on discovering study directories and producing an inventory that 
 ### Features
 
 - Command line interface for scanning a root directory for CBCT studies.
-- Simple web UI to run scans, choose a Catphan phantom, review detected studies, and download the JSON inventory.
+- Simple web UI to run scans, choose a Catphan phantom, review detected studies, and execute bulk Pylinac analysis with live feedback.
 - Configurable file extensions and optional symlink following.
 - JSON inventory output listing discovered studies and metadata (paths, file counts, detected extensions).
 - Logging to facilitate troubleshooting missing or malformed datasets.
@@ -45,7 +45,7 @@ python -m pylinac_bulkcbct.ui
 pylinac-bulkcbct-ui
 ```
 
-Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. Pick the Catphan phantom model you plan to analyse against, adjust the image extensions if needed, and run the scan. The page displays summary metadata and a table of the detected studies, and offers a button to download the raw JSON inventory for later processing steps.
+Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. Pick the Catphan phantom model you plan to analyse against, adjust the image extensions if needed, and run the scan. The page displays summary metadata, a table of the detected studies, and automatically runs the selected Pylinac Catphan analysis to surface successes, failures, and text summaries for each dataset.
 
 ## Development
 

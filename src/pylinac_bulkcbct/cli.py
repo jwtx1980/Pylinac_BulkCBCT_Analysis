@@ -7,7 +7,13 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .inventory import DEFAULT_EXTENSIONS, build_inventory
+if __package__ in {None, ""}:
+    # Allow running as a standalone script without installing the package by
+    # appending the project source directory to ``sys.path`` before importing.
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from pylinac_bulkcbct.inventory import DEFAULT_EXTENSIONS, build_inventory
+else:
+    from .inventory import DEFAULT_EXTENSIONS, build_inventory
 
 LOG_LEVELS = {"critical", "error", "warning", "info", "debug"}
 

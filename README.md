@@ -24,6 +24,16 @@ pylinac-bulkcbct-scan /path/to/cbct/root --output inventory.json
 
 The command will recurse through the supplied root directory and produce a JSON inventory that includes all study directories discovered. If `--output` is omitted, the inventory is printed to standard output.
 
+### Running without installation
+
+For quick experiments you can invoke the CLI module directly without installing the project:
+
+```bash
+python src/pylinac_bulkcbct/cli.py /path/to/cbct/root --output inventory.json
+```
+
+This mode adjusts `sys.path` automatically so the module imports resolve even when the package has not been installed yet.
+
 ## Development
 
 Run the unit tests with:

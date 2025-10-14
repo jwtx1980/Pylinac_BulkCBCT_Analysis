@@ -9,6 +9,7 @@ Task 1 focuses on discovering study directories and producing an inventory that 
 ### Features
 
 - Command line interface for scanning a root directory for CBCT studies.
+- Simple web UI to run scans, review detected studies, and download the JSON inventory.
 - Configurable file extensions and optional symlink following.
 - JSON inventory output listing discovered studies and metadata (paths, file counts, detected extensions).
 - Logging to facilitate troubleshooting missing or malformed datasets.
@@ -33,6 +34,18 @@ python src/pylinac_bulkcbct/cli.py /path/to/cbct/root --output inventory.json
 ```
 
 This mode adjusts `sys.path` automatically so the module imports resolve even when the package has not been installed yet.
+
+### Web user interface
+
+Launch the lightweight Flask UI to run scans from a browser:
+
+```bash
+python -m pylinac_bulkcbct.ui
+# or, after installation
+pylinac-bulkcbct-ui
+```
+
+Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. The page displays summary metadata and a table of the detected studies, and offers a button to download the raw JSON inventory for later processing steps.
 
 ## Development
 

@@ -30,12 +30,7 @@ def test_run_catphan_analysis_success(monkeypatch, tmp_path: Path):
     class FakeCatphan:
         def __init__(self, directory: str):
             self.directory = directory
-
-        @classmethod
-        def from_dir(cls, directory: str):
-            instance = cls(directory)
-            instance._results_data = {"value": 1, "timestamp": datetime.now(UTC)}
-            return instance
+            self._results_data = {"value": 1, "timestamp": datetime.now(UTC)}
 
         def analyze(self) -> None:
             return None
@@ -63,8 +58,7 @@ def test_run_catphan_analysis_failure(monkeypatch, tmp_path: Path):
     inventory = _build_inventory(tmp_path)
 
     class FailingCatphan:
-        @classmethod
-        def from_dir(cls, directory: str):
+        def __init__(self, directory: str):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(analysis, "_load_catphan_class", lambda name: FailingCatphan)
@@ -75,6 +69,35 @@ def test_run_catphan_analysis_failure(monkeypatch, tmp_path: Path):
     assert batch.failure_count == 1
     assert batch.results[0].success is False
     assert "boom" in batch.results[0].error
+
+
+def test_run_catphan_analysis_uses_from_dir_when_available(monkeypatch, tmp_path: Path):
+    inventory = _build_inventory(tmp_path)
+
+    class FactoryCatphan:
+        def __init__(self, directory: str):
+            raise AssertionError("__init__ should not be called when from_dir exists")
+
+        @classmethod
+        def from_dir(cls, directory: str):
+            class Instance:
+                def analyze(self) -> None:
+                    return None
+
+                def results(self) -> str:
+                    return "factory"
+
+                def results_data(self) -> dict:
+                    return {"value": 2}
+
+            return Instance()
+
+    monkeypatch.setattr(analysis, "_load_catphan_class", lambda name: FactoryCatphan)
+
+    batch = run_catphan_analysis(inventory, "CatPhan503")
+
+    assert batch.success_count == 1
+    assert batch.results[0].summary == "factory"
 
 
 def test_load_catphan_class_without_pylinac(monkeypatch):

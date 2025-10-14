@@ -45,10 +45,6 @@ def _load_catphan_class(phantom_name: str) -> type[CatphanLike]:
 class CatphanLike(Protocol):
     """Protocol describing the pylinac Catphan API we rely on."""
 
-    @classmethod
-    def from_dir(cls, directory: str) -> "CatphanLike":
-        ...
-
     def analyze(self) -> None:
         ...
 
@@ -119,7 +115,11 @@ def run_catphan_analysis(inventory: StudyInventory, phantom_name: str) -> BatchA
 
     for study in inventory.studies:
         try:
-            phantom = catphan_cls.from_dir(str(study.path))
+            from_dir = getattr(catphan_cls, "from_dir", None)
+            if callable(from_dir):
+                phantom = from_dir(str(study.path))
+            else:
+                phantom = catphan_cls(str(study.path))
             phantom.analyze()
             summary = phantom.results()
             metrics = _serialise_metrics(phantom.results_data())

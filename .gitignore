@@ -1,29 +1,18 @@
-﻿# Byte-compiled / cache
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-
-# Logs
 *.log
-
-# Envs
 .env
 .venv/
 venv/
-
-# Build artifacts
 build/
 dist/
 *.egg-info/
-
-# Notebooks & IDE
 .ipynb_checkpoints/
 .DS_Store
 .vscode/
 .idea/
-
-# Test/typing caches
 .pytest_cache/
 .mypy_cache/
 .coverage

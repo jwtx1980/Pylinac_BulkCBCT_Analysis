@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pylinac_bulkcbct.inventory import build_inventory
+from pylinac_bulkcbct.inventory import StudyInventory, StudyRecord, build_inventory
 
 
 def create_dicom_file(path: Path) -> None:
@@ -51,3 +51,17 @@ def test_inventory_serializes_to_json(tmp_path: Path) -> None:
     assert payload["root"].endswith("study") is False
     assert payload["study_count"] == 1
     assert payload["studies"][0]["relative_path"] == "study"
+
+
+def test_inventory_roundtrip(tmp_path: Path) -> None:
+    study_dir = tmp_path / "patient" / "study"
+    study_dir.mkdir(parents=True)
+    create_dicom_file(study_dir / "image.dcm")
+
+    original = build_inventory(tmp_path)
+    restored = StudyInventory.from_dict(original.to_dict())
+
+    assert restored.root == original.root
+    assert restored.generated_at == original.generated_at
+    assert len(restored.studies) == len(original.studies)
+    assert all(isinstance(record, StudyRecord) for record in restored.studies)

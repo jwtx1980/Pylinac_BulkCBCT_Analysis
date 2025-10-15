@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, List, Sequence, Set
+from typing import Iterable, List, Mapping, Sequence, Set
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,18 @@ class StudyRecord:
             "extensions": sorted(self.extensions),
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "StudyRecord":
+        """Reconstruct a :class:`StudyRecord` from :meth:`to_dict` output."""
+
+        extensions = payload.get("extensions") or []
+        return cls(
+            path=Path(str(payload["path"])),
+            relative_path=Path(str(payload["relative_path"])),
+            file_count=int(payload["file_count"]),
+            extensions={str(ext) for ext in extensions},
+        )
+
 
 @dataclass
 class StudyInventory:
@@ -65,6 +77,19 @@ class StudyInventory:
         """Render the inventory as JSON."""
 
         return json.dumps(self.to_dict(), indent=indent)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "StudyInventory":
+        """Reconstruct a :class:`StudyInventory` from :meth:`to_dict` output."""
+
+        return cls(
+            root=Path(str(payload["root"])),
+            generated_at=datetime.fromisoformat(str(payload["generated_at"])),
+            studies=[
+                StudyRecord.from_dict(item)
+                for item in payload.get("studies", [])
+            ],
+        )
 
 
 def build_inventory(

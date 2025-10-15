@@ -1,6 +1,7 @@
 """Simple web UI for running CBCT inventory scans."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -10,6 +11,8 @@ from flask import Flask, flash, render_template_string, request
 try:  # pragma: no cover - exercised when running as script
     from .analysis import (
         CatphanAnalysisError,
+        BatchAnalysis,
+        export_pass_results_to_xml,
         run_catphan_analysis,
     )
     from .inventory import DEFAULT_EXTENSIONS, StudyInventory, build_inventory
@@ -23,7 +26,9 @@ except ImportError:  # pragma: no cover - fallback for direct execution
         build_inventory,
     )
     from pylinac_bulkcbct.analysis import (  # type: ignore[import-not-found]
+        BatchAnalysis,
         CatphanAnalysisError,
+        export_pass_results_to_xml,
         run_catphan_analysis,
     )
 
@@ -144,6 +149,8 @@ def create_app() -> Flask:
               {% endif %}
             {% endwith %}
             <form method="post" action="{{ url_for('index') }}">
+                <input type="hidden" name="inventory_payload" value="{{ inventory_payload }}">
+                <input type="hidden" name="analysis_payload" value="{{ analysis_payload }}">
                 <div>
                     <label for="root">Scan root directory</label>
                     <input type="text" id="root" name="root" required value="{{ state.root }}" placeholder="/path/to/cbct/root">
@@ -168,6 +175,9 @@ def create_app() -> Flask:
                 <div class="actions">
                     <button type="submit" name="action" value="inventory">Pull CBCTs</button>
                     <button type="submit" name="action" value="analyze" class="secondary">Run Catphan Analysis</button>
+                    {% if analysis and analysis.success_count %}
+                        <button type="submit" name="action" value="export" class="secondary">Export pass results to XML</button>
+                    {% endif %}
                 </div>
             </form>
 
@@ -276,9 +286,13 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET", "POST"])
     def index() -> str:
         state = FormState()
+        inventory_obj: StudyInventory | None = None
         inventory_dict: dict | None = None
         inventory_json: str | None = None
-        analysis = None
+        inventory_payload = ""
+        analysis_obj: BatchAnalysis | None = None
+        analysis_dict: dict | None = None
+        analysis_payload = ""
         action = "inventory"
 
         if request.method == "POST":
@@ -287,49 +301,128 @@ def create_app() -> Flask:
             state.follow_symlinks = request.form.get("follow_symlinks") == "on"
             state.phantom = request.form.get("phantom", state.phantom)
             action = request.form.get("action", "inventory")
+            inventory_payload = request.form.get("inventory_payload", "")
+            analysis_payload = request.form.get("analysis_payload", "")
 
             if not state.root:
                 flash("Please provide a root directory to scan.", "error")
             else:
-                inventory = None
-                try:
-                    inventory = _build_inventory_from_form(state)
-                except FileNotFoundError:
-                    flash("The provided root directory does not exist.", "error")
-                except NotADirectoryError:
-                    flash("The provided root path is not a directory.", "error")
-                except Exception as exc:  # pragma: no cover - defensive
-                    flash(f"An unexpected error occurred: {exc}", "error")
-                else:
-                    inventory_dict = inventory.to_dict()
-                    inventory_json = inventory.to_json()
-                    flash(
-                        f"Scan completed successfully with {inventory_dict['study_count']} studies.",
-                        "success",
-                    )
+                if inventory_payload:
+                    try:
+                        inventory_dict = json.loads(inventory_payload)
+                        inventory_obj = StudyInventory.from_dict(inventory_dict)
+                        inventory_json = json.dumps(inventory_dict, indent=2)
+                    except Exception:
+                        inventory_payload = ""
+                        inventory_obj = None
+                        inventory_dict = None
+                        inventory_json = None
+                        flash(
+                            "Previous scan data could not be restored. A new scan will be required.",
+                            "error",
+                        )
 
-                    if action == "analyze":
-                        if not inventory.studies:
-                            flash("No studies were discovered to analyze.", "error")
-                        else:
-                            try:
-                                analysis = run_catphan_analysis(inventory, state.phantom)
-                            except CatphanAnalysisError as exc:
-                                flash(str(exc), "error")
-                            except Exception as exc:  # pragma: no cover - defensive
-                                flash(f"Failed to run Pylinac analysis: {exc}", "error")
+                if analysis_payload:
+                    try:
+                        analysis_dict = json.loads(analysis_payload)
+                        analysis_obj = BatchAnalysis.from_dict(analysis_dict)
+                    except Exception:
+                        analysis_payload = ""
+                        analysis_obj = None
+                        analysis_dict = None
+                        flash(
+                            "Previous analysis results could not be restored. Please rerun the Catphan analysis.",
+                            "error",
+                        )
+
+                if action in {"inventory", "analyze"}:
+                    inventory = None
+                    try:
+                        inventory = _build_inventory_from_form(state)
+                    except FileNotFoundError:
+                        flash("The provided root directory does not exist.", "error")
+                    except NotADirectoryError:
+                        flash("The provided root path is not a directory.", "error")
+                    except Exception as exc:  # pragma: no cover - defensive
+                        flash(f"An unexpected error occurred: {exc}", "error")
+                    else:
+                        inventory_obj = inventory
+                        inventory_dict = inventory.to_dict()
+                        inventory_json = inventory.to_json()
+                        inventory_payload = json.dumps(inventory_dict, separators=(",", ":"))
+                        flash(
+                            f"Scan completed successfully with {inventory_dict['study_count']} studies.",
+                            "success",
+                        )
+
+                        if action == "analyze":
+                            if not inventory.studies:
+                                flash("No studies were discovered to analyze.", "error")
                             else:
-                                flash(
-                                    "Pylinac Catphan analysis completed. Review the results below.",
-                                    "success",
-                                )
+                                try:
+                                    analysis_obj = run_catphan_analysis(inventory, state.phantom)
+                                except CatphanAnalysisError as exc:
+                                    flash(str(exc), "error")
+                                except Exception as exc:  # pragma: no cover - defensive
+                                    flash(f"Failed to run Pylinac analysis: {exc}", "error")
+                                else:
+                                    analysis_dict = analysis_obj.to_dict()
+                                    analysis_payload = json.dumps(analysis_dict, separators=(",", ":"))
+                                    flash(
+                                        "Pylinac Catphan analysis completed. Review the results below.",
+                                        "success",
+                                    )
+                        else:
+                            analysis_obj = None
+                            analysis_dict = None
+                            analysis_payload = ""
+                elif action == "export":
+                    if inventory_obj is None:
+                        flash(
+                            "Pull CBCTs before exporting pass results to XML.",
+                            "error",
+                        )
+                    elif analysis_obj is None:
+                        flash(
+                            "Run a Catphan analysis before exporting pass results to XML.",
+                            "error",
+                        )
+                    else:
+                        destination = Path(state.root).expanduser().resolve() / "catphan_results.xml"
+                        exported, skipped = export_pass_results_to_xml(
+                            analysis_obj, destination
+                        )
+                        if exported:
+                            flash(
+                                f"Exported {exported} successful analyses to {destination}.",
+                                "success",
+                            )
+                        else:
+                            flash(
+                                "No successful analyses were available for export.",
+                                "error",
+                            )
+
+                        if skipped:
+                            flash(
+                                f"Skipped {skipped} previously exported studies.",
+                                "success" if exported else "error",
+                            )
+
+                        analysis_obj.results = [
+                            result for result in analysis_obj.results if not result.success
+                        ]
+                        analysis_dict = analysis_obj.to_dict()
+                        analysis_payload = json.dumps(analysis_dict, separators=(",", ":"))
 
         return render_template_string(
             template,
             state=state,
             inventory=inventory_dict,
             inventory_json=inventory_json,
-            analysis=analysis,
+            analysis=analysis_dict,
+            inventory_payload=inventory_payload,
+            analysis_payload=analysis_payload,
             phantom_options=CATPHAN_MODELS,
         )
 

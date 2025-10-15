@@ -5,7 +5,9 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import import_module
-from typing import Any, Iterable, Protocol
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Protocol
+from xml.etree import ElementTree as ET
 
 from .inventory import StudyInventory, StudyRecord
 
@@ -80,6 +82,22 @@ class StudyAnalysisResult:
             "error": self.error,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> StudyAnalysisResult:
+        """Reconstruct a result from :meth:`to_dict` data."""
+
+        metrics_payload = payload.get("metrics") or {}
+        if not isinstance(metrics_payload, dict):
+            metrics_payload = {}
+
+        return cls(
+            study=StudyRecord.from_dict(payload["study"]),
+            success=bool(payload.get("success", False)),
+            summary=payload.get("summary"),
+            metrics=dict(metrics_payload),
+            error=payload.get("error"),
+        )
+
 
 @dataclass
 class BatchAnalysis:
@@ -105,6 +123,24 @@ class BatchAnalysis:
             "failure_count": self.failure_count,
             "results": [result.to_dict() for result in self.results],
         }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> BatchAnalysis:
+        """Reconstruct a batch analysis from :meth:`to_dict` data."""
+
+        return cls(
+            phantom=str(payload["phantom"]),
+            generated_at=datetime.fromisoformat(payload["generated_at"]),
+            results=[
+                StudyAnalysisResult.from_dict(result)
+                for result in payload.get("results", [])
+            ],
+        )
+
+    def successful_results(self) -> list[StudyAnalysisResult]:
+        """Return all successfully analysed studies."""
+
+        return [result for result in self.results if result.success]
 
 
 def run_catphan_analysis(inventory: StudyInventory, phantom_name: str) -> BatchAnalysis:
@@ -143,12 +179,102 @@ def run_catphan_analysis(inventory: StudyInventory, phantom_name: str) -> BatchA
     return BatchAnalysis(phantom=phantom_name, generated_at=datetime.now(UTC), results=results)
 
 
+def _append_value(parent: ET.Element, key: str, value: Any) -> None:
+    """Append ``value`` as an XML element under ``parent``."""
+
+    if isinstance(value, dict):
+        container = ET.SubElement(parent, key)
+        for child_key, child_value in value.items():
+            _append_value(container, str(child_key), child_value)
+    elif isinstance(value, list):
+        container = ET.SubElement(parent, key)
+        for item in value:
+            _append_value(container, "Item", item)
+    else:
+        element = ET.SubElement(parent, key)
+        if value is not None:
+            element.text = str(value)
+
+
+def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple[int, int]:
+    """Append successful study analyses from ``batch`` to an XML file.
+
+    Parameters
+    ----------
+    batch:
+        The batch analysis containing results to export.
+    destination:
+        The XML file that should be created or appended to.
+
+    Returns
+    -------
+    tuple[int, int]
+        A tuple containing the number of exported studies and the number of
+        successes skipped because they already existed in the file.
+    """
+
+    successes = batch.successful_results()
+    if not successes:
+        return (0, 0)
+
+    destination = destination.expanduser().resolve()
+
+    if destination.exists():
+        tree = ET.parse(destination)
+        root = tree.getroot()
+    else:
+        root = ET.Element("CBCTAnalysisResults")
+        tree = ET.ElementTree(root)
+
+    existing_keys = {
+        (element.get("id"), element.get("phantom"))
+        for element in root.findall("Study")
+    }
+
+    exported = 0
+    skipped = 0
+
+    for result in successes:
+        study_id = str(result.study.relative_path)
+        key = (study_id, batch.phantom)
+        if key in existing_keys:
+            skipped += 1
+            continue
+
+        study_el = ET.SubElement(
+            root,
+            "Study",
+            {
+                "id": study_id,
+                "phantom": batch.phantom,
+                "exported_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        ET.SubElement(study_el, "AbsolutePath").text = str(result.study.path)
+        if result.summary:
+            ET.SubElement(study_el, "Summary").text = result.summary
+
+        metrics_el = ET.SubElement(study_el, "Metrics")
+        for metric_key, metric_value in result.metrics.items():
+            _append_value(metrics_el, str(metric_key), metric_value)
+
+        existing_keys.add(key)
+        exported += 1
+
+    if exported:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tree.write(destination, encoding="utf-8", xml_declaration=True)
+
+    return (exported, skipped)
+
+
 __all__: Iterable[str] = [
     "BatchAnalysis",
     "CatphanAnalysisError",
     "PhantomNotAvailableError",
     "PylinacNotInstalledError",
     "StudyAnalysisResult",
+    "export_pass_results_to_xml",
     "run_catphan_analysis",
 ]
 

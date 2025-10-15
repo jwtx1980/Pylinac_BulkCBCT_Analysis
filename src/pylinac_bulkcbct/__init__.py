@@ -6,6 +6,7 @@ from .analysis import (
     PhantomNotAvailableError,
     PylinacNotInstalledError,
     StudyAnalysisResult,
+    export_pass_results_to_xml,
     run_catphan_analysis,
 )
 from .inventory import StudyInventory, StudyRecord, build_inventory
@@ -19,5 +20,6 @@ __all__ = [
     "StudyInventory",
     "StudyRecord",
     "build_inventory",
+    "export_pass_results_to_xml",
     "run_catphan_analysis",
 ]

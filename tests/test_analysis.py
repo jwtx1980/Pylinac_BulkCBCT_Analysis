@@ -7,8 +7,11 @@ import pytest
 
 from pylinac_bulkcbct import analysis
 from pylinac_bulkcbct.analysis import (
+    BatchAnalysis,
     PhantomNotAvailableError,
     PylinacNotInstalledError,
+    StudyAnalysisResult,
+    export_pass_results_to_xml,
     run_catphan_analysis,
 )
 from pylinac_bulkcbct.inventory import StudyInventory, StudyRecord
@@ -118,4 +121,44 @@ def test_load_catphan_class_missing_phantom(monkeypatch):
 
     with pytest.raises(PhantomNotAvailableError):
         analysis._load_catphan_class("CatPhan999")
+
+
+def test_batch_analysis_roundtrip(tmp_path: Path):
+    inventory = _build_inventory(tmp_path)
+    result = StudyAnalysisResult(
+        study=inventory.studies[0],
+        success=True,
+        summary="ok",
+        metrics={"value": 1},
+    )
+    batch = BatchAnalysis(phantom="CatPhan503", generated_at=datetime.now(UTC), results=[result])
+
+    restored = BatchAnalysis.from_dict(batch.to_dict())
+
+    assert restored.phantom == batch.phantom
+    assert restored.generated_at == batch.generated_at
+    assert restored.success_count == 1
+    assert restored.results[0].summary == "ok"
+
+
+def test_export_pass_results_to_xml(tmp_path: Path):
+    inventory = _build_inventory(tmp_path)
+    success_result = StudyAnalysisResult(
+        study=inventory.studies[0],
+        success=True,
+        summary="ok",
+        metrics={"value": 1, "nested": {"inner": 2}},
+    )
+    batch = BatchAnalysis(phantom="CatPhan503", generated_at=datetime.now(UTC), results=[success_result])
+
+    destination = tmp_path / "results.xml"
+    exported, skipped = export_pass_results_to_xml(batch, destination)
+
+    assert exported == 1
+    assert skipped == 0
+    assert destination.exists()
+
+    exported_again, skipped_again = export_pass_results_to_xml(batch, destination)
+    assert exported_again == 0
+    assert skipped_again == 1
 

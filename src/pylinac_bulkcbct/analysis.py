@@ -252,7 +252,15 @@ def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple
         )
         ET.SubElement(study_el, "AbsolutePath").text = str(result.study.path)
         if result.summary:
-            ET.SubElement(study_el, "Summary").text = result.summary
+            summary_el = ET.SubElement(study_el, "Summary")
+            normalised = result.summary.replace("\r\n", "\n").replace("\r", "\n")
+            entries = [line.strip() for line in normalised.split("\n") if line.strip()]
+
+            if entries:
+                for entry in entries:
+                    ET.SubElement(summary_el, "Entry").text = entry
+            else:
+                summary_el.text = result.summary
 
         metrics_el = ET.SubElement(study_el, "Metrics")
         for metric_key, metric_value in result.metrics.items():

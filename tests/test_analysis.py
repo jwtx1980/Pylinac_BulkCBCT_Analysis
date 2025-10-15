@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -157,6 +158,11 @@ def test_export_pass_results_to_xml(tmp_path: Path):
     assert exported == 1
     assert skipped == 0
     assert destination.exists()
+
+    tree = ET.parse(destination)
+    root = tree.getroot()
+    summary_entries = root.find("Study").find("Summary").findall("Entry")
+    assert [entry.text for entry in summary_entries] == ["ok"]
 
     exported_again, skipped_again = export_pass_results_to_xml(batch, destination)
     assert exported_again == 0

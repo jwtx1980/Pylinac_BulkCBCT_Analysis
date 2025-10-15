@@ -147,8 +147,8 @@ def test_export_pass_results_to_xml(tmp_path: Path):
     success_result = StudyAnalysisResult(
         study=inventory.studies[0],
         success=True,
-        summary="ok",
-        metrics={"value": 1, "nested": {"inner": 2}},
+        summary="- Heading -\nMetric A: 1\nMulti-line key:\nValue part one,\nvalue part two\nSlice Thickness Passed? False\nLoose note",
+        metrics={"value": 1, "nested": {"inner": 2, "items": [3, {"name": "example"}]}},
     )
     batch = BatchAnalysis(phantom="CatPhan503", generated_at=datetime.now(UTC), results=[success_result])
 
@@ -161,8 +161,23 @@ def test_export_pass_results_to_xml(tmp_path: Path):
 
     tree = ET.parse(destination)
     root = tree.getroot()
-    summary_entries = root.find("Study").find("Summary").findall("Entry")
-    assert [entry.text for entry in summary_entries] == ["ok"]
+    summary_el = root.find("Study").find("Summary")
+    assert [section.text for section in summary_el.findall("Section")] == ["Heading"]
+    summary_items = {item.get("name"): item.text for item in summary_el.findall("Item")}
+    assert summary_items["Metric A"] == "1"
+    assert summary_items["Multi-line key"] == "Value part one, value part two"
+    assert summary_items["Slice Thickness Passed?"] == "False"
+    notes = [note.text for note in summary_el.findall("Note")]
+    assert notes == ["Loose note"]
+
+    metric_elements = root.find("Study").find("Metrics").findall("Metric")
+    metrics_map = {element.get("name"): element.text for element in metric_elements}
+    assert metrics_map == {
+        "value": "1",
+        "nested.inner": "2",
+        "nested.items[0]": "3",
+        "nested.items[1].name": "example",
+    }
 
     exported_again, skipped_again = export_pass_results_to_xml(batch, destination)
     assert exported_again == 0

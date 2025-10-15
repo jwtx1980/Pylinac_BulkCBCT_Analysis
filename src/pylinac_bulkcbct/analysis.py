@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 from xml.etree import ElementTree as ET
 
 from .inventory import StudyInventory, StudyRecord
@@ -61,6 +61,106 @@ def _serialise_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     """Ensure ``metrics`` can be serialised by normalising non-JSON types."""
 
     return json.loads(json.dumps(metrics, default=str))
+
+
+def _flatten_metrics(payload: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    """Return a flattened list of metric key/value pairs."""
+
+    flattened: list[tuple[str, Any]] = []
+
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flattened.extend(_flatten_metrics(value, child_prefix))
+    elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        for index, value in enumerate(payload):
+            child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            flattened.extend(_flatten_metrics(value, child_prefix))
+    else:
+        flattened.append((prefix, payload))
+
+    return flattened
+
+
+def _normalise_summary(summary: str) -> list[str]:
+    """Collapse wrapped summary lines into a list of logical entries."""
+
+    normalised = summary.replace("\r\n", "\n").replace("\r", "\n")
+    raw_lines = [line.strip() for line in normalised.split("\n") if line.strip()]
+
+    merged: list[str] = []
+    buffer = ""
+
+    for line in raw_lines:
+        if buffer:
+            buffer = f"{buffer} {line}"
+        else:
+            buffer = line
+
+        if line.endswith(":") or line.endswith(","):
+            continue
+
+        merged.append(buffer.strip())
+        buffer = ""
+
+    if buffer:
+        merged.append(buffer.strip())
+
+    return merged
+
+
+def _looks_like_value(token: str) -> bool:
+    """Return ``True`` if ``token`` resembles a scalar value."""
+
+    cleaned = token.strip()
+    if not cleaned:
+        return False
+
+    lowered = cleaned.lower()
+    if lowered in {"true", "false", "yes", "no", "pass", "fail"}:
+        return True
+
+    try:
+        float(cleaned.replace(",", ""))
+    except ValueError:
+        return False
+
+    return True
+
+
+def _emit_summary(summary_el: ET.Element, summary: str) -> None:
+    """Populate ``summary_el`` with structured content from ``summary``."""
+
+    for entry in _normalise_summary(summary):
+        stripped = entry.strip()
+
+        if stripped.startswith("-") and stripped.endswith("-") and stripped.strip("-").strip():
+            section_text = stripped.strip("-").strip()
+            section_el = ET.SubElement(summary_el, "Section")
+            section_el.text = section_text
+            continue
+
+        key: str | None = None
+        value: str | None = None
+
+        if ":" in stripped:
+            potential_key, potential_value = stripped.split(":", 1)
+            key = potential_key.strip()
+            value = potential_value.strip() or None
+        else:
+            pieces = stripped.rsplit(" ", 1)
+            if len(pieces) == 2 and _looks_like_value(pieces[1]):
+                potential_key, potential_value = pieces
+                key = potential_key.strip()
+                value = potential_value.strip() or None
+
+        if key:
+            item_el = ET.SubElement(summary_el, "Item", {"name": key})
+            if value:
+                item_el.text = value
+        else:
+            note_el = ET.SubElement(summary_el, "Note")
+            note_el.text = stripped
 
 
 @dataclass
@@ -179,23 +279,6 @@ def run_catphan_analysis(inventory: StudyInventory, phantom_name: str) -> BatchA
     return BatchAnalysis(phantom=phantom_name, generated_at=datetime.now(UTC), results=results)
 
 
-def _append_value(parent: ET.Element, key: str, value: Any) -> None:
-    """Append ``value`` as an XML element under ``parent``."""
-
-    if isinstance(value, dict):
-        container = ET.SubElement(parent, key)
-        for child_key, child_value in value.items():
-            _append_value(container, str(child_key), child_value)
-    elif isinstance(value, list):
-        container = ET.SubElement(parent, key)
-        for item in value:
-            _append_value(container, "Item", item)
-    else:
-        element = ET.SubElement(parent, key)
-        if value is not None:
-            element.text = str(value)
-
-
 def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple[int, int]:
     """Append successful study analyses from ``batch`` to an XML file.
 
@@ -253,18 +336,16 @@ def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple
         ET.SubElement(study_el, "AbsolutePath").text = str(result.study.path)
         if result.summary:
             summary_el = ET.SubElement(study_el, "Summary")
-            normalised = result.summary.replace("\r\n", "\n").replace("\r", "\n")
-            entries = [line.strip() for line in normalised.split("\n") if line.strip()]
+            _emit_summary(summary_el, result.summary)
 
-            if entries:
-                for entry in entries:
-                    ET.SubElement(summary_el, "Entry").text = entry
-            else:
-                summary_el.text = result.summary
-
-        metrics_el = ET.SubElement(study_el, "Metrics")
-        for metric_key, metric_value in result.metrics.items():
-            _append_value(metrics_el, str(metric_key), metric_value)
+        flattened_metrics = _flatten_metrics(result.metrics)
+        if flattened_metrics:
+            metrics_el = ET.SubElement(study_el, "Metrics")
+            for metric_key, metric_value in flattened_metrics:
+                attrs = {"name": metric_key} if metric_key else {}
+                metric_el = ET.SubElement(metrics_el, "Metric", attrs)
+                if metric_value is not None:
+                    metric_el.text = str(metric_value)
 
         existing_keys.add(key)
         exported += 1

@@ -104,7 +104,7 @@ def create_app() -> Flask:
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>CBCT Inventory Scanner</title>
+        <title>CBCT Bulk Processor</title>
         <style>
             body { font-family: system-ui, sans-serif; background: #f7f7f7; margin: 0; padding: 0; }
             header { background: #1f4b99; color: white; padding: 1.5rem; }
@@ -137,7 +137,7 @@ def create_app() -> Flask:
     </head>
     <body>
         <header>
-            <h1>CBCT Inventory Scanner</h1>
+            <h1>CBCT Bulk Processor</h1>
             <p>Discover CBCT study folders and review their metadata before bulk processing with Pylinac.</p>
         </header>
         <main>
@@ -389,31 +389,37 @@ def create_app() -> Flask:
                         )
                     else:
                         destination = Path(state.root).expanduser().resolve() / "catphan_results.xml"
-                        exported, skipped = export_pass_results_to_xml(
-                            analysis_obj, destination
-                        )
-                        if exported:
-                            flash(
-                                f"Exported {exported} successful analyses to {destination}.",
-                                "success",
+                        try:
+                            exported, skipped = export_pass_results_to_xml(
+                                analysis_obj, destination
                             )
+                        except CatphanAnalysisError as exc:
+                            flash(str(exc), "error")
+                        except Exception as exc:  # pragma: no cover - defensive
+                            flash(f"Failed to export analysis results: {exc}", "error")
                         else:
-                            flash(
-                                "No successful analyses were available for export.",
-                                "error",
-                            )
+                            if exported:
+                                flash(
+                                    f"Exported {exported} successful analyses to {destination}.",
+                                    "success",
+                                )
+                            else:
+                                flash(
+                                    "No successful analyses were available for export.",
+                                    "error",
+                                )
 
-                        if skipped:
-                            flash(
-                                f"Skipped {skipped} previously exported studies.",
-                                "success" if exported else "error",
-                            )
+                            if skipped:
+                                flash(
+                                    f"Skipped {skipped} previously exported studies.",
+                                    "success" if exported else "error",
+                                )
 
-                        analysis_obj.results = [
-                            result for result in analysis_obj.results if not result.success
-                        ]
-                        analysis_dict = analysis_obj.to_dict()
-                        analysis_payload = json.dumps(analysis_dict, separators=(",", ":"))
+                            analysis_obj.results = [
+                                result for result in analysis_obj.results if not result.success
+                            ]
+                            analysis_dict = analysis_obj.to_dict()
+                            analysis_payload = json.dumps(analysis_dict, separators=(",", ":"))
 
         return render_template_string(
             template,

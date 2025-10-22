@@ -28,7 +28,7 @@ def client(app):
 def test_index_page_loads(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert b"CBCT Inventory Scanner" in response.data
+    assert b"CBCT Bulk Processor" in response.data
     assert b"Catphan 503" in response.data
     assert b"Pull CBCTs" in response.data
     assert b"Run Catphan Analysis" in response.data

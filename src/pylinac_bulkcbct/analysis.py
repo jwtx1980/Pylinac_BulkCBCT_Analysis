@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import import_module
@@ -44,6 +45,17 @@ def _load_catphan_class(phantom_name: str) -> type[CatphanLike]:
     return catphan_cls
 
 
+def _create_catphan_instance(
+    catphan_cls: type[CatphanLike], study_path: Path | str
+) -> CatphanLike:
+    """Instantiate ``catphan_cls`` for ``study_path`` respecting ``from_dir``."""
+
+    from_dir = getattr(catphan_cls, "from_dir", None)
+    if callable(from_dir):
+        return from_dir(str(study_path))
+    return catphan_cls(str(study_path))
+
+
 class CatphanLike(Protocol):
     """Protocol describing the pylinac Catphan API we rely on."""
 
@@ -54,6 +66,9 @@ class CatphanLike(Protocol):
         ...
 
     def results_data(self) -> dict[str, Any]:
+        ...
+
+    def publish_pdf(self, destination: str) -> None:
         ...
 
 
@@ -251,11 +266,7 @@ def run_catphan_analysis(inventory: StudyInventory, phantom_name: str) -> BatchA
 
     for study in inventory.studies:
         try:
-            from_dir = getattr(catphan_cls, "from_dir", None)
-            if callable(from_dir):
-                phantom = from_dir(str(study.path))
-            else:
-                phantom = catphan_cls(str(study.path))
+            phantom = _create_catphan_instance(catphan_cls, study.path)
             phantom.analyze()
             summary = phantom.results()
             metrics = _serialise_metrics(phantom.results_data())
@@ -277,6 +288,20 @@ def run_catphan_analysis(inventory: StudyInventory, phantom_name: str) -> BatchA
             )
 
     return BatchAnalysis(phantom=phantom_name, generated_at=datetime.now(UTC), results=results)
+
+
+def _report_filename(study_id: str, phantom: str) -> str:
+    """Return a filesystem-safe PDF filename for ``study_id`` and ``phantom``."""
+
+    safe_study = re.sub(
+        r"[^A-Za-z0-9_.-]+",
+        "_",
+        study_id.replace("\\", "_").replace("/", "_"),
+    )
+    safe_phantom = re.sub(r"[^A-Za-z0-9_.-]+", "_", phantom)
+    safe_study = safe_study.strip("_") or "study"
+    safe_phantom = safe_phantom.strip("_") or "catphan"
+    return f"{safe_study}_{safe_phantom}.pdf"
 
 
 def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple[int, int]:
@@ -301,6 +326,9 @@ def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple
         return (0, 0)
 
     destination = destination.expanduser().resolve()
+    reports_dir = destination.parent / f"{destination.stem}_reports"
+
+    catphan_cls = _load_catphan_class(batch.phantom)
 
     if destination.exists():
         tree = ET.parse(destination)
@@ -334,6 +362,20 @@ def export_pass_results_to_xml(batch: BatchAnalysis, destination: Path) -> tuple
             },
         )
         ET.SubElement(study_el, "AbsolutePath").text = str(result.study.path)
+
+        report_path: Path | None = None
+        try:
+            phantom = _create_catphan_instance(catphan_cls, result.study.path)
+            phantom.analyze()
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            report_path = reports_dir / _report_filename(study_id, batch.phantom)
+            phantom.publish_pdf(str(report_path))
+        except Exception:
+            report_path = None
+
+        if report_path is not None:
+            ET.SubElement(study_el, "Report").text = str(report_path)
+
         if result.summary:
             summary_el = ET.SubElement(study_el, "Summary")
             _emit_summary(summary_el, result.summary)

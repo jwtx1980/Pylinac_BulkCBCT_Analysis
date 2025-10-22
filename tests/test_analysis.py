@@ -142,7 +142,7 @@ def test_batch_analysis_roundtrip(tmp_path: Path):
     assert restored.results[0].summary == "ok"
 
 
-def test_export_pass_results_to_xml(tmp_path: Path):
+def test_export_pass_results_to_xml(tmp_path: Path, monkeypatch):
     inventory = _build_inventory(tmp_path)
     success_result = StudyAnalysisResult(
         study=inventory.studies[0],
@@ -151,6 +151,22 @@ def test_export_pass_results_to_xml(tmp_path: Path):
         metrics={"value": 1, "nested": {"inner": 2, "items": [3, {"name": "example"}]}},
     )
     batch = BatchAnalysis(phantom="CatPhan503", generated_at=datetime.now(UTC), results=[success_result])
+
+    created_reports: list[Path] = []
+
+    class FakeCatphan:
+        def __init__(self, directory: str):
+            self.directory = directory
+
+        def analyze(self) -> None:
+            return None
+
+        def publish_pdf(self, destination: str) -> None:
+            report_path = Path(destination)
+            report_path.write_text("pdf")
+            created_reports.append(report_path)
+
+    monkeypatch.setattr(analysis, "_load_catphan_class", lambda name: FakeCatphan)
 
     destination = tmp_path / "results.xml"
     exported, skipped = export_pass_results_to_xml(batch, destination)
@@ -178,6 +194,15 @@ def test_export_pass_results_to_xml(tmp_path: Path):
         "nested.items[0]": "3",
         "nested.items[1].name": "example",
     }
+
+    reports_dir = destination.parent / "results_reports"
+    assert reports_dir.exists()
+    report_file = reports_dir / "study_CatPhan503.pdf"
+    assert report_file in created_reports
+    assert report_file.exists()
+    report_el = root.find("Study").find("Report")
+    assert report_el is not None
+    assert report_el.text == str(report_file)
 
     exported_again, skipped_again = export_pass_results_to_xml(batch, destination)
     assert exported_again == 0

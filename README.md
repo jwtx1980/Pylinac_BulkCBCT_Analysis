@@ -9,7 +9,7 @@ Task 1 focuses on discovering study directories and producing an inventory that 
 ### Features
 
 - Command line interface for scanning a root directory for CBCT studies.
-- Simple web UI to run scans, review detected studies, and download the JSON inventory.
+- Simple web UI to run scans, choose a Catphan phantom, review detected studies, execute bulk Pylinac analysis with live feedback, and export successful runs to XML for downstream processing.
 - Configurable file extensions and optional symlink following.
 - JSON inventory output listing discovered studies and metadata (paths, file counts, detected extensions).
 - Logging to facilitate troubleshooting missing or malformed datasets.
@@ -45,7 +45,9 @@ python -m pylinac_bulkcbct.ui
 pylinac-bulkcbct-ui
 ```
 
-Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. The page displays summary metadata and a table of the detected studies, and offers a button to download the raw JSON inventory for later processing steps.
+Open the printed URL (default `http://127.0.0.1:5000/`) and provide the root directory that contains your CBCT studies. Pick the Catphan phantom model you plan to analyse against, adjust the image extensions if needed, and click **Pull CBCTs** to review the discovered studies. Once you are happy with the list, press **Run Catphan Analysis** to execute the selected Pylinac analysis. The page displays summary metadata for the scan, a table of detected studies, and per-study Catphan analysis outcomes when requested.
+
+When successful analyses are available, an **Export pass results to XML** button appears. Selecting it appends each passing study (including the displayed study identifier and full metric payload) to `catphan_results.xml` in the chosen root directory. A sibling folder named after the XML file (for example `catphan_results_reports/`) is created to store per-study PDF reports published directly from Pylinac. Exported studies are removed from the on-screen list so you can focus on retrying failures with a different phantom configuration while the XML file accumulates all passing runs.
 
 ## Development
 

@@ -1,13 +1,20 @@
 """Simple web UI for running CBCT inventory scans."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from flask import Flask, Response, flash, redirect, render_template_string, request, url_for
+from flask import Flask, flash, render_template_string, request
 
 try:  # pragma: no cover - exercised when running as script
+    from .analysis import (
+        CatphanAnalysisError,
+        BatchAnalysis,
+        export_pass_results_to_xml,
+        run_catphan_analysis,
+    )
     from .inventory import DEFAULT_EXTENSIONS, StudyInventory, build_inventory
 except ImportError:  # pragma: no cover - fallback for direct execution
     import sys
@@ -18,6 +25,58 @@ except ImportError:  # pragma: no cover - fallback for direct execution
         StudyInventory,
         build_inventory,
     )
+    from pylinac_bulkcbct.analysis import (  # type: ignore[import-not-found]
+        BatchAnalysis,
+        CatphanAnalysisError,
+        export_pass_results_to_xml,
+        run_catphan_analysis,
+    )
+
+
+_FALLBACK_CTPHAN_MODELS: tuple[tuple[str, str], ...] = (
+    ("CatPhan503", "Catphan 503"),
+    ("CatPhan504", "Catphan 504"),
+    ("CatPhan600", "Catphan 600"),
+    ("CatPhan604", "Catphan 604"),
+    ("CatPhan700", "Catphan 700"),
+)
+
+
+def _discover_catphan_models() -> Sequence[tuple[str, str]]:
+    """Return Catphan phantom options available from pylinac."""
+
+    try:
+        from pylinac import ct  # type: ignore
+    except Exception:  # pragma: no cover - pylinac optional during inventory-only use
+        return _FALLBACK_CTPHAN_MODELS
+
+    options: list[tuple[str, str]] = []
+    for attr in dir(ct):
+        if not attr.startswith("CatPhan"):
+            continue
+        suffix = attr[7:]
+        if not suffix.isdigit():
+            continue
+        label = f"Catphan {suffix}"
+        options.append((attr, label))
+
+    if not options:
+        return _FALLBACK_CTPHAN_MODELS
+
+    # Sort by the numeric phantom identifier to keep the menu deterministic.
+    options.sort(key=lambda item: int(item[0][7:]))
+    # Remove duplicates while preserving order.
+    seen: set[str] = set()
+    deduped: list[tuple[str, str]] = []
+    for value, label in options:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append((value, label))
+    return tuple(deduped)
+
+
+CATPHAN_MODELS: Sequence[tuple[str, str]] = _discover_catphan_models()
 
 
 @dataclass
@@ -27,6 +86,7 @@ class FormState:
     root: str = ""
     extensions: str = " ".join(DEFAULT_EXTENSIONS)
     follow_symlinks: bool = False
+    phantom: str = CATPHAN_MODELS[0][0] if CATPHAN_MODELS else _FALLBACK_CTPHAN_MODELS[0][0]
 
 
 def _parse_extensions(raw: str) -> Sequence[str]:
@@ -37,7 +97,6 @@ def _parse_extensions(raw: str) -> Sequence[str]:
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = "pylinac-bulkcbct-ui"
-    app.config.setdefault("LAST_INVENTORY_JSON", None)
 
     template = """
     <!doctype html>
@@ -45,7 +104,7 @@ def create_app() -> Flask:
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>CBCT Inventory Scanner</title>
+        <title>CBCT Bulk Processor</title>
         <style>
             body { font-family: system-ui, sans-serif; background: #f7f7f7; margin: 0; padding: 0; }
             header { background: #1f4b99; color: white; padding: 1.5rem; }
@@ -53,12 +112,14 @@ def create_app() -> Flask:
             h1 { margin-top: 0; }
             form { display: grid; gap: 1.2rem; }
             label { display: block; font-weight: 600; margin-bottom: 0.4rem; }
-            input[type=text], textarea { width: 100%; padding: 0.6rem 0.8rem; border-radius: 8px; border: 1px solid #ccd6eb; font-size: 1rem; }
-            input[type=text]:focus, textarea:focus { outline: 2px solid #1f4b99; }
+            input[type=text], textarea, select { width: 100%; padding: 0.6rem 0.8rem; border-radius: 8px; border: 1px solid #ccd6eb; font-size: 1rem; }
+            input[type=text]:focus, textarea:focus, select:focus { outline: 2px solid #1f4b99; }
             .checkbox { display: flex; align-items: center; gap: 0.5rem; }
-            .actions { display: flex; gap: 0.75rem; align-items: center; }
-            button, .button-link { background: #1f4b99; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 999px; font-size: 1rem; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
-            button:hover, .button-link:hover { background: #163a76; }
+            .actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+            button { background: #1f4b99; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 999px; font-size: 1rem; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
+            button.secondary { background: #4b5563; }
+            button.secondary:hover { background: #374151; }
+            button:hover { background: #163a76; }
             .message { padding: 0.75rem 1rem; border-radius: 8px; }
             .message.error { background: #fce8e6; color: #6b1a12; border: 1px solid #f7b5ae; }
             .message.success { background: #e6f4ea; color: #0b5f1a; border: 1px solid #a1d6a3; }
@@ -68,11 +129,15 @@ def create_app() -> Flask:
             tbody tr:hover { background: #f9fbff; }
             .inventory-meta { margin-top: 2rem; display: grid; gap: 0.5rem; }
             pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+            .status-pill { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.75rem; border-radius: 999px; font-weight: 600; }
+            .status-pill.success { background: #e6f4ea; color: #0b5f1a; }
+            .status-pill.failure { background: #fce8e6; color: #6b1a12; }
+            details.analysis-details { margin-top: 1rem; }
         </style>
     </head>
     <body>
         <header>
-            <h1>CBCT Inventory Scanner</h1>
+            <h1>CBCT Bulk Processor</h1>
             <p>Discover CBCT study folders and review their metadata before bulk processing with Pylinac.</p>
         </header>
         <main>
@@ -84,6 +149,8 @@ def create_app() -> Flask:
               {% endif %}
             {% endwith %}
             <form method="post" action="{{ url_for('index') }}">
+                <input type="hidden" name="inventory_payload" value="{{ inventory_payload }}">
+                <input type="hidden" name="analysis_payload" value="{{ analysis_payload }}">
                 <div>
                     <label for="root">Scan root directory</label>
                     <input type="text" id="root" name="root" required value="{{ state.root }}" placeholder="/path/to/cbct/root">
@@ -93,14 +160,23 @@ def create_app() -> Flask:
                     <textarea id="extensions" name="extensions" rows="2">{{ state.extensions }}</textarea>
                     <small>Separate multiple extensions with spaces or commas. Use leading dots, e.g. <code>.dcm .ima</code>.</small>
                 </div>
+                <div>
+                    <label for="phantom">Catphan phantom model</label>
+                    <select id="phantom" name="phantom">
+                        {% for value, label in phantom_options %}
+                            <option value="{{ value }}" {% if state.phantom == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
                 <div class="checkbox">
                     <input type="checkbox" id="follow_symlinks" name="follow_symlinks" {% if state.follow_symlinks %}checked{% endif %}>
                     <label for="follow_symlinks">Follow symlinks during the scan</label>
                 </div>
                 <div class="actions">
-                    <button type="submit">Run inventory</button>
-                    {% if inventory %}
-                        <a href="{{ url_for('download_json') }}" class="button-link" download>Download JSON</a>
+                    <button type="submit" name="action" value="inventory">Pull CBCTs</button>
+                    <button type="submit" name="action" value="analyze" class="secondary">Run Catphan Analysis</button>
+                    {% if analysis and analysis.success_count %}
+                        <button type="submit" name="action" value="export" class="secondary">Export pass results to XML</button>
                     {% endif %}
                 </div>
             </form>
@@ -139,6 +215,57 @@ def create_app() -> Flask:
                     <pre>{{ inventory_json }}</pre>
                 </details>
             {% endif %}
+
+            {% if analysis %}
+                <section class="inventory-meta">
+                    <h2>Pylinac analysis</h2>
+                    <p><strong>Catphan phantom:</strong> {{ analysis.phantom }}</p>
+                    <p><strong>Completed:</strong> {{ analysis.generated_at }}</p>
+                    <p><strong>Successes:</strong> {{ analysis.success_count }} &nbsp; <strong>Failures:</strong> {{ analysis.failure_count }}</p>
+                </section>
+                {% if analysis.results %}
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Study</th>
+                                <th>Status</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for result in analysis.results %}
+                                <tr>
+                                    <td><code>{{ result.study.relative_path }}</code></td>
+                                    <td>
+                                        {% if result.success %}
+                                            <span class="status-pill success">Success</span>
+                                        {% else %}
+                                            <span class="status-pill failure">Failed</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if result.success and result.summary %}
+                                            <details class="analysis-details">
+                                                <summary>View summary</summary>
+                                                <pre>{{ result.summary }}</pre>
+                                            </details>
+                                        {% elif result.error %}
+                                            <details class="analysis-details">
+                                                <summary>Error details</summary>
+                                                <pre>{{ result.error }}</pre>
+                                            </details>
+                                        {% else %}
+                                            <em>No details returned.</em>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>No studies were available for analysis.</p>
+                {% endif %}
+            {% endif %}
         </main>
     </body>
     </html>
@@ -159,51 +286,150 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET", "POST"])
     def index() -> str:
         state = FormState()
+        inventory_obj: StudyInventory | None = None
         inventory_dict: dict | None = None
         inventory_json: str | None = None
+        inventory_payload = ""
+        analysis_obj: BatchAnalysis | None = None
+        analysis_dict: dict | None = None
+        analysis_payload = ""
+        action = "inventory"
 
         if request.method == "POST":
             state.root = request.form.get("root", "").strip()
             state.extensions = request.form.get("extensions", state.extensions)
             state.follow_symlinks = request.form.get("follow_symlinks") == "on"
+            state.phantom = request.form.get("phantom", state.phantom)
+            action = request.form.get("action", "inventory")
+            inventory_payload = request.form.get("inventory_payload", "")
+            analysis_payload = request.form.get("analysis_payload", "")
 
             if not state.root:
                 flash("Please provide a root directory to scan.", "error")
             else:
-                try:
-                    inventory = _build_inventory_from_form(state)
-                except FileNotFoundError:
-                    flash("The provided root directory does not exist.", "error")
-                except NotADirectoryError:
-                    flash("The provided root path is not a directory.", "error")
-                except Exception as exc:  # pragma: no cover - defensive
-                    flash(f"An unexpected error occurred: {exc}", "error")
-                else:
-                    inventory_dict = inventory.to_dict()
-                    inventory_json = inventory.to_json()
-                    app.config["LAST_INVENTORY_JSON"] = inventory_json
-                    flash(
-                        f"Scan completed successfully with {inventory_dict['study_count']} studies.",
-                        "success",
-                    )
+                if inventory_payload:
+                    try:
+                        inventory_dict = json.loads(inventory_payload)
+                        inventory_obj = StudyInventory.from_dict(inventory_dict)
+                        inventory_json = json.dumps(inventory_dict, indent=2)
+                    except Exception:
+                        inventory_payload = ""
+                        inventory_obj = None
+                        inventory_dict = None
+                        inventory_json = None
+                        flash(
+                            "Previous scan data could not be restored. A new scan will be required.",
+                            "error",
+                        )
+
+                if analysis_payload:
+                    try:
+                        analysis_dict = json.loads(analysis_payload)
+                        analysis_obj = BatchAnalysis.from_dict(analysis_dict)
+                    except Exception:
+                        analysis_payload = ""
+                        analysis_obj = None
+                        analysis_dict = None
+                        flash(
+                            "Previous analysis results could not be restored. Please rerun the Catphan analysis.",
+                            "error",
+                        )
+
+                if action in {"inventory", "analyze"}:
+                    inventory = None
+                    try:
+                        inventory = _build_inventory_from_form(state)
+                    except FileNotFoundError:
+                        flash("The provided root directory does not exist.", "error")
+                    except NotADirectoryError:
+                        flash("The provided root path is not a directory.", "error")
+                    except Exception as exc:  # pragma: no cover - defensive
+                        flash(f"An unexpected error occurred: {exc}", "error")
+                    else:
+                        inventory_obj = inventory
+                        inventory_dict = inventory.to_dict()
+                        inventory_json = inventory.to_json()
+                        inventory_payload = json.dumps(inventory_dict, separators=(",", ":"))
+                        flash(
+                            f"Scan completed successfully with {inventory_dict['study_count']} studies.",
+                            "success",
+                        )
+
+                        if action == "analyze":
+                            if not inventory.studies:
+                                flash("No studies were discovered to analyze.", "error")
+                            else:
+                                try:
+                                    analysis_obj = run_catphan_analysis(inventory, state.phantom)
+                                except CatphanAnalysisError as exc:
+                                    flash(str(exc), "error")
+                                except Exception as exc:  # pragma: no cover - defensive
+                                    flash(f"Failed to run Pylinac analysis: {exc}", "error")
+                                else:
+                                    analysis_dict = analysis_obj.to_dict()
+                                    analysis_payload = json.dumps(analysis_dict, separators=(",", ":"))
+                                    flash(
+                                        "Pylinac Catphan analysis completed. Review the results below.",
+                                        "success",
+                                    )
+                        else:
+                            analysis_obj = None
+                            analysis_dict = None
+                            analysis_payload = ""
+                elif action == "export":
+                    if inventory_obj is None:
+                        flash(
+                            "Pull CBCTs before exporting pass results to XML.",
+                            "error",
+                        )
+                    elif analysis_obj is None:
+                        flash(
+                            "Run a Catphan analysis before exporting pass results to XML.",
+                            "error",
+                        )
+                    else:
+                        destination = Path(state.root).expanduser().resolve() / "catphan_results.xml"
+                        try:
+                            exported, skipped = export_pass_results_to_xml(
+                                analysis_obj, destination
+                            )
+                        except CatphanAnalysisError as exc:
+                            flash(str(exc), "error")
+                        except Exception as exc:  # pragma: no cover - defensive
+                            flash(f"Failed to export analysis results: {exc}", "error")
+                        else:
+                            if exported:
+                                flash(
+                                    f"Exported {exported} successful analyses to {destination}.",
+                                    "success",
+                                )
+                            else:
+                                flash(
+                                    "No successful analyses were available for export.",
+                                    "error",
+                                )
+
+                            if skipped:
+                                flash(
+                                    f"Skipped {skipped} previously exported studies.",
+                                    "success" if exported else "error",
+                                )
+
+                            analysis_obj.results = [
+                                result for result in analysis_obj.results if not result.success
+                            ]
+                            analysis_dict = analysis_obj.to_dict()
+                            analysis_payload = json.dumps(analysis_dict, separators=(",", ":"))
 
         return render_template_string(
             template,
             state=state,
             inventory=inventory_dict,
             inventory_json=inventory_json,
-        )
-
-    @app.route("/download.json")
-    def download_json() -> Response:
-        inventory_json = app.config.get("LAST_INVENTORY_JSON")
-        if inventory_json is None:
-            flash("Run a scan before downloading the JSON output.", "error")
-            return redirect(url_for("index"))
-        return Response(
-            inventory_json,
-            mimetype="application/json",
-            headers={"Content-Disposition": "attachment; filename=inventory.json"},
+            analysis=analysis_dict,
+            inventory_payload=inventory_payload,
+            analysis_payload=analysis_payload,
+            phantom_options=CATPHAN_MODELS,
         )
 
     return app

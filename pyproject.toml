@@ -12,6 +12,7 @@ requires-python = ">=3.10"
 
 [project.dependencies]
 flask = ">=3.0"
+pylinac = ">=3.0"
 
 [project.optional-dependencies]
 dev = [
